@@ -1,0 +1,269 @@
+```html
+       <!DOCTYPE html>
+       <html lang="en">
+       <head>
+         <meta charset="UTF-8" />
+         <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+         <title>Wind Turbine Weather Route Optimizer</title>
+         <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+         <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"/>
+         <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+         <style>
+           html, body { height: 100%; margin: 0; }
+           #map { height: 50vh; width: 100%; border: 1px solid #ccc; }
+           #location-input {
+             position: absolute; top: 10px; left: 50px;
+             z-index: 1000; background: white; padding: 10px;
+             border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+           }
+           #locations-container input { 
+             display: block; margin-bottom: 5px; padding: 5px; width: 300px; 
+             border: 1px solid #ccc; border-radius: 4px;
+           }
+           #location-input button { 
+             margin: 5px 0 0 5px; padding: 5px 10px; 
+             background-color: #007bff; color: white; border: none; border-radius: 4px; 
+           }
+           #location-input button:hover { background-color: #0056b3; }
+           .legend {
+             position: absolute; bottom: 30px; left: 50px;
+             z-index: 1000; background: white; padding: 10px;
+             border-radius: 5px; font-size: 12px; box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+           }
+           #chart-container, #weather-table, #route-display { margin: 20px auto; max-width: 1000px; }
+           canvas { max-width: 100%; }
+           .table th, .table td { vertical-align: middle; }
+           .suitable { color: green; font-weight: bold; }
+           .not-suitable { color: red; font-weight: bold; }
+           #route-display h3 { color: #343a40; }
+           #route-display p { font-size: 16px; font-weight: bold; }
+         </style>
+       </head>
+       <body>
+         <div id="location-input">
+           <div id="locations-container">
+             <input type="text" class="location" placeholder="Enter city or lat,lng (e.g., New York,US or 40.71,-74.01)">
+           </div>
+           <button onclick="addLocationInput()">Add Location</button>
+           <button onclick="getLocationsWeather()">Search</button>
+         </div>
+         <div id="map"></div>
+         <div id="chart-container">
+           <canvas id="weatherChart"></canvas>
+         </div>
+         <div id="weather-table" class="container">
+           <h3>Daily Weather and Suitability</h3>
+           <table class="table table-striped table-bordered" id="weather-data-table">
+             <thead class="table-dark">
+               <tr>
+                 <th>Location</th>
+                 <th>Day</th>
+                 <th>Avg Temp (°F)</th>
+                 <th>Avg Wind Speed (mph)</th>
+                 <th>Rain (mm)</th>
+                 <th>Main Condition</th>
+                 <th>Suitability</th>
+               </tr>
+             </thead>
+             <tbody id="weather-table-body"></tbody>
+           </table>
+         </div>
+         <div id="route-display" class="container">
+           <h3>Best Route</h3>
+           <p id="route-text">No route calculated yet.</p>
+         </div>
+
+         <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+         <script>
+           // Global variables
+           let map, markers = [], chartData = { labels: [], datasets: [{ label: 'Suitability Score', data: [], backgroundColor: [], borderColor: [], borderWidth: 1 }] }, weatherTableData = [], weatherChart;
+
+           // Function definitions in global scope
+           function addLocationInput() {
+             const container = document.getElementById('locations-container');
+             const input = document.createElement('input');
+             input.type = 'text';
+             input.className = 'location';
+             input.placeholder = 'Enter city or lat,lng (e.g., New York,US or 40.71,-74.01)';
+             container.appendChild(input);
+           }
+
+           async function geocodeLocation(location) {
+             let query = location;
+             if (!location.includes(',US') && !location.match(/^[-]?[0-9]*\.?[0-9]+,[-]?[0-9]*\.?[0-9]+$/)) {
+               query = `${location},US`;
+             }
+             const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=1`;
+             const response = await fetch(url, { headers: { 'User-Agent': 'WindTurbineOptimizer/1.0' } });
+             if (!response.ok) throw new Error(`Geocoding failed for ${location}: ${response.statusText}`);
+             const data = await response.json();
+             if (data.length === 0) throw new Error(`Location not found: ${location}`);
+             return { lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon), name: location };
+           }
+
+           async function getLocationsWeather() {
+             markers.forEach(m => map.removeLayer(m));
+             markers = [];
+             chartData = { labels: [], datasets: [{ label: 'Suitability Score', data: [], backgroundColor: [], borderColor: [], borderWidth: 1 }] };
+             weatherTableData = [];
+             document.getElementById('weather-table-body').innerHTML = '';
+             document.getElementById('route-text').innerText = 'No route calculated yet.';
+
+             const inputs = document.querySelectorAll('.location');
+             const allLocations = Array.from(inputs)
+               .map(input => input.value.trim())
+               .filter(Boolean)
+               .join(',')
+               .split(',')
+               .map(loc => loc.trim())
+               .filter(Boolean);
+
+             if (allLocations.length === 0) {
+               alert('Enter at least one city or lat,lng.');
+               return;
+             }
+
+             let results = [];
+
+             for (let loc of allLocations) {
+               try {
+                 let lat, lon, name;
+                 const match = loc.match(/^([-]?[0-9]*\.?[0-9]+),([-]?[0-9]*\.?[0-9]+)$/);
+                 if (match) {
+                   lat = parseFloat(match[1]);
+                   lon = parseFloat(match[2]);
+                   name = `(${lat.toFixed(2)},${lon.toFixed(2)})`;
+                 } else {
+                   const coords = await geocodeLocation(loc);
+                   lat = coords.lat; lon = coords.lon; name = coords.name;
+                 }
+
+                 const { score, ideal, days, dailyData } = await fetchWeather(lat, lon, name);
+                 results.push({ name, lat, lon, score, ideal, days });
+                 weatherTableData.push({ name, dailyData });
+
+                 chartData.labels.push(name);
+                 chartData.datasets[0].data.push(score);
+                 chartData.datasets[0].backgroundColor.push(score >= 50 ? 'rgba(54, 162, 235, 0.7)' : 'rgba(255, 99, 132, 0.7)');
+                 chartData.datasets[0].borderColor.push(score >= 50 ? 'rgba(54, 162, 235, 1)' : 'rgba(255, 99, 132, 1)');
+
+                 const marker = L.marker([lat, lon], {
+                   icon: L.divIcon({
+                     className: "custom-marker",
+                     html: `<div style="color:${score >= 50 ? 'green' : 'red'}; font-size:18px;">●</div>`,
+                     iconSize: [18, 18]
+                   })
+                 }).bindPopup(`<b>Location:</b> ${name}<br><b>Ideal Days:</b> ${ideal} of ${days} (${score}%)<br><b>Status:</b> <span style="color:${score >= 50 ? 'green' : 'red'}; font-weight:bold;">${score >= 50 ? 'OK to Work' : 'Not OK to Work'}</span>`).addTo(map);
+                 markers.push(marker);
+
+               } catch (e) {
+                 console.error(`Error processing ${loc}:`, e);
+                 alert(`Error processing ${loc}: ${e.message}`);
+               }
+             }
+
+             results.sort((a, b) => b.score - a.score);
+             let routeNames = results.map(r => r.name).join(" → ");
+             if (results.length > 0) {
+               alert("Best Work Route Order:\n" + routeNames);
+               console.log("Best Work Route:", routeNames);
+               document.getElementById('route-text').innerText = routeNames;
+               const group = L.featureGroup(markers);
+               map.fitBounds(group.getBounds().pad(0.2));
+               map.invalidateSize();
+             }
+
+             updateChart();
+             updateWeatherTable();
+           }
+
+           async function fetchWeather(lat, lon, name) {
+             const apiKey = 'a4d9014252c38bc44c165b7513db376a';
+             const url = `https://api.openweathermap.org/data/2.5/forecast?lat=${lat}&lon=${lon}&appid=${apiKey}&units=imperial`;
+             const response = await fetch(url);
+             if (!response.ok) throw new Error(`Weather API error: ${response.statusText}`);
+             const data = await response.json();
+
+             const dailyData = {};
+             data.list.forEach(forecast => {
+               const date = forecast.dt_txt.split(' ')[0];
+               if (!dailyData[date]) {
+                 dailyData[date] = { temps: [], windSpeeds: [], rain: 0, conditions: [] };
+               }
+               dailyData[date].temps.push(forecast.main.temp);
+               dailyData[date].windSpeeds.push(forecast.wind.speed);
+               dailyData[date].rain += forecast.rain ? (forecast.rain['3h'] || 0) : 0;
+               dailyData[date].conditions.push(forecast.weather[0].main);
+             });
+
+             let ideal = 0;
+             const dailyTableData = [];
+             for (let date in dailyData) {
+               const avgTemp = dailyData[date].temps.reduce((a, b) => a + b, 0) / dailyData[date].temps.length;
+               const avgWind = dailyData[date].windSpeeds.reduce((a, b) => a + b, 0) / dailyData[date].windSpeeds.length;
+               const rain = dailyData[date].rain;
+               const mainCondition = dailyData[date].conditions.sort((a, b) => dailyData[date].conditions.filter(v => v === a).length - dailyData[date].conditions.filter(v => v === b).length).pop();
+               const hasThunderstorm = dailyData[date].conditions.includes('Thunderstorm');
+               const isSuitable = avgWind < 20 && rain === 0 && !hasThunderstorm && avgTemp >= 32 && avgTemp <= 95;
+               if (isSuitable) ideal++;
+               dailyTableData.push({
+                 date, avgTemp: avgTemp.toFixed(1), avgWind: avgWind.toFixed(1), rain: rain.toFixed(1),
+                 mainCondition, suitability: isSuitable ? 'OK to Work' : 'Not OK to Work'
+               });
+             }
+
+             const days = Object.keys(dailyData).length;
+             const percent = ((ideal / days) * 100).toFixed(1);
+             return { score: parseFloat(percent), ideal, days, dailyData: dailyTableData };
+           }
+
+           function updateWeatherTable() {
+             const tbody = document.getElementById('weather-table-body');
+             tbody.innerHTML = '';
+             weatherTableData.forEach(location => {
+               location.dailyData.forEach(day => {
+                 const row = document.createElement('tr');
+                 row.innerHTML = `
+                   <td>${location.name}</td><td>${day.date}</td><td>${day.avgTemp}</td><td>${day.avgWind}</td>
+                   <td>${day.rain}</td><td>${day.mainCondition}</td>
+                   <td class="${day.suitability === 'OK to Work' ? 'suitable' : 'not-suitable'}">${day.suitability}</td>
+                 `;
+                 tbody.appendChild(row);
+               });
+             });
+           }
+
+           function updateChart() {
+             weatherChart.data = chartData;
+             weatherChart.update();
+           }
+
+           // Initialize on DOM load
+           document.addEventListener('DOMContentLoaded', function() {
+             map = L.map('map').setView([39.8283, -98.5795], 4);
+             L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+               attribution: '&copy; OpenStreetMap contributors'
+             }).addTo(map);
+
+             const legend = L.control({ position: 'bottomleft' });
+             legend.onAdd = function(map) {
+               const div = L.DomUtil.create('div', 'legend');
+               div.innerHTML = `<b>Legend</b><br><i style="color: green; font-weight: bold;">Green</i>: OK to Work (≥50% ideal days)<br><i style="color: red; font-weight: bold;">Red</i>: Not OK to Work (<50% ideal days)`;
+               return div;
+             };
+             legend.addTo(map);
+
+             const ctx = document.getElementById('weatherChart').getContext('2d');
+             weatherChart = new Chart(ctx, {
+               type: 'bar', data: chartData, options: {
+                 scales: { y: { beginAtZero: true, max: 100, title: { display: true, text: 'Suitability Score (%)' } },
+                           x: { title: { display: true, text: 'Location' } } },
+                 plugins: { title: { display: true, text: 'Suitability Scores for Turbine Work' }, legend: { display: false } }
+               }
+             });
+           });
+         </script>
+         <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+       </body>
+       </html>
+       ```
